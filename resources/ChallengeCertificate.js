@@ -46,7 +46,19 @@ const startSubscription = async () => {
     }
 };
 
-startSubscription();
+// We only want this to trigger one time.
+if (server.workerIndex === 0) {
+    startSubscription();
+    setInterval(async () => {
+        for await (const challengeDomain of tables.ChallengeCertificate.search({
+            conditions: [{attribute: 'renewalDate',  comparator: 'less_than', value: new Date()}]
+        })){
+            if (await isChallengeLeader()) {
+                await performHttpChallenge(challengeDomain.domain, true);
+            }
+        }
+    }, 43200000); // Every 12 hours
+}
 
 async function performHttpChallenge(domain, renewal = false) {
     try {
@@ -142,16 +154,6 @@ async function performHttpChallenge(domain, renewal = false) {
         throw error;
     }
 }
-
-setInterval(async () => {
-    for await (const challengeDomain of tables.ChallengeCertificate.search({
-        conditions: [{attribute: 'renewalDate',  comparator: 'less_than', value: new Date()}]
-    })){
-        if (await isChallengeLeader()) {
-            await performHttpChallenge(challengeDomain.domain, true);
-        }
-    }
-}, 43200000); // Every 12 hours
 
 async function isChallengeLeader() {
     let hdbNodesExist = false;
