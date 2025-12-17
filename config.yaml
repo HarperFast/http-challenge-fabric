@@ -1,0 +1,6 @@
+jsResource:
+  files:
+    - 'resources/*.js'
+rest: true
+graphqlSchema:
+  files: './schema.graphql'

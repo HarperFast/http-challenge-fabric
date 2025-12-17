@@ -1,0 +1,13 @@
+{
+  "name": "http-challenge-fabric",
+  "version": "0.0.1",
+  "description": "Handle HTTP Challenge for Let's Encrypt",
+  "prettier": "@harperdb/code-guidelines/prettier",
+  "dependencies": {
+    "@harperdb/code-guidelines": "^0.0.2",
+    "acme-client": "^5.4.0"
+  },
+  "devDependencies": {
+    "prettier": "^3.3.3"
+  }
+}

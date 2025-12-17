@@ -1,0 +1,7 @@
+type ChallengeCertificate @table @sealed {
+    domain: ID! @primaryKey
+    issueDate: Date
+    renewalDate: Date @indexed
+    challengeToken: String @indexed
+    challengeContent: String
+}
