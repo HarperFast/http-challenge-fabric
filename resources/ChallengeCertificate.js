@@ -23,10 +23,15 @@ server.http(async (request, next) => {
     return next(request);
 });
 
-async function performHttpChallengeWithRetry(domain) {
+async function performHttpChallengeWithRetry(domain, initialDelay = 0) {
     const maxRetries = 5;
-    const initialDelay = 120000; // 2 minutes
+    const delayInterval = 120000; // 2 minutes
     let lastError;
+
+    // Sleep before starting the retry loop
+    if (initialDelay > 0) {
+        await new Promise(resolve => setTimeout(resolve, initialDelay));
+    }
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
@@ -52,9 +57,12 @@ const startSubscription = async () => {
                 const data = event.value?.data;
                 if (!data) continue;
                 if (!data.challengeToken) {
-                    if (await isChallengeLeader()) {
+                    const { isLeader, totalNodes } = await isChallengeLeader();
+                    if (isLeader) {
+                        // Wait 60 seconds per additional node before starting the challenge for deployment
+                        const initialDelay = (totalNodes - 1) * 60000;
                         // Fire and forget - don't block other events
-                        performHttpChallengeWithRetry(data.domain);
+                        performHttpChallengeWithRetry(data.domain, initialDelay);
                     }
                 }
             } catch (err) {
@@ -76,7 +84,8 @@ if (server.workerIndex === 0) {
         for await (const challengeDomain of tables.ChallengeCertificate.search({
             conditions: [{attribute: 'renewalDate',  comparator: 'less_than', value: new Date()}]
         })){
-            if (await isChallengeLeader()) {
+            const { isLeader } = await isChallengeLeader();
+            if (isLeader) {
                 await performHttpChallenge(challengeDomain.domain, true);
             }
         }
@@ -184,19 +193,27 @@ async function performHttpChallenge(domain, renewal = false) {
 }
 
 async function isChallengeLeader() {
-    let hdbNodesExist = false;
-    for await (const hdbNode of databases.system.table.hdb_nodes.search()) {
-        hdbNodesExist = true;
-        // Only perform HTTP Challenge on one node. Use the order of `hdb_nodes` to determine a challenge leader
-        if (hdbNode.name === replication.hostname) {
-            // Perform HTTP Challenge Certificate Request
-            return true
-        }
+    let totalCount = 0;
+    let isLeader = false;
+    let firstNodeName = null;
 
-        // Only check the first record because we only want to do this on one node in a cluster
-        break;
+    for await (const hdbNode of databases.system.table.hdb_nodes.search()) {
+        totalCount++;
+
+        // Store the first node's name to determine leadership
+        if (totalCount === 1) {
+            firstNodeName = hdbNode.name;
+        }
     }
 
-    // If no HDB nodes exist, perform HTTP Challenge Certificate Request
-    return !hdbNodesExist;
+    // Only perform HTTP Challenge on one node. Use the first node in `hdb_nodes` to determine the challenge leader
+    if (totalCount === 0) {
+        // If no HDB nodes exist, perform HTTP Challenge Certificate Request
+        isLeader = true;
+    } else if (firstNodeName === replication.hostname) {
+        // This node is the first node, so it's the leader
+        isLeader = true;
+    }
+
+    return { isLeader, totalNodes: totalCount };
 }
