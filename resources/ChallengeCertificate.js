@@ -35,12 +35,13 @@ async function performHttpChallengeWithRetry(domain, initialDelay = 0) {
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
+            logger.notify("Starting http challenge for domain:", domain);
             await performHttpChallenge(domain);
             return; // Success
         } catch (error) {
             lastError = error;
             if (attempt < maxRetries) {
-                const delay = initialDelay * Math.pow(2, attempt);
+                const delay = delayInterval * Math.pow(2, attempt);
                 logger.warn(`HTTP challenge attempt ${attempt + 1} failed for ${domain}, retrying in ${delay}ms:`, error.message);
                 await new Promise(resolve => setTimeout(resolve, delay));
             } else {
@@ -54,10 +55,12 @@ const startSubscription = async () => {
     try {
         for await (let event of await tables.ChallengeCertificate.subscribe()) {
             try {
+                logger.notify("ChallengeCertificate event:", event);
                 const data = event.value?.data;
                 if (!data) continue;
                 if (!data.challengeToken) {
                     const { isLeader, totalNodes } = await isChallengeLeader();
+                    logger.notify("ChallengeCertificate leader:", isLeader ? "Yes" : "No")
                     if (isLeader) {
                         // Wait 60 seconds per additional node before starting the challenge for deployment
                         const initialDelay = (totalNodes - 1) * 60000;
@@ -79,6 +82,7 @@ const startSubscription = async () => {
 
 // We only want this to trigger one time.
 if (server.workerIndex === 0) {
+    logger.notify("Starting Challenge Certificate Subscription");
     startSubscription();
     const interval = setInterval(async () => {
         for await (const challengeDomain of tables.ChallengeCertificate.search({
@@ -173,7 +177,7 @@ async function performHttpChallenge(domain, renewal = false) {
             challengeContent: null
         });
 
-        console.log(`Certificate issued successfully for ${domain}`);
+        logger.notify(`Certificate issued successfully for ${domain}`);
         await server.operation(
             {
                 operation: 'add_certificate',
