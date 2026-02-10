@@ -1,6 +1,6 @@
 {
   "name": "http-challenge-fabric",
-  "version": "0.0.2",
+  "version": "1.0.0",
   "description": "Handle HTTP Challenge for Let's Encrypt",
   "prettier": "@harperdb/code-guidelines/prettier",
   "type": "module",
