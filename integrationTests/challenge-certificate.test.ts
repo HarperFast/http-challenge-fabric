@@ -93,19 +93,14 @@ suite('Harper startup', (ctx: ContextWithHarper) => {
   });
 
   test('ChallengeCertificate table is created in the data database', async () => {
-    // Verify the table exists by searching it via the Operations API.
-    const { status, body } = await op<unknown[]>(ctx, {
-      operation: 'search_by_conditions',
+    // Verify the table exists by describing it via the Operations API.
+    const { status, body } = await op<{ name: string }>(ctx, {
+      operation: 'describe_table',
       database: 'data',
       table: 'ChallengeCertificate',
-      operator: 'and',
-      get_attributes: ['domain'],
-      conditions: [
-        { search_attribute: 'domain', search_type: 'contains', search_value: '' },
-      ],
     });
-    strictEqual(status, 200, `Operations API search should succeed, got ${status}: ${JSON.stringify(body)}`);
-    ok(Array.isArray(body), 'expected array result from search');
+    strictEqual(status, 200, `describe_table should succeed, got ${status}: ${JSON.stringify(body)}`);
+    ok(typeof body === 'object' && body !== null, 'expected object result from describe_table');
   });
 });
 
