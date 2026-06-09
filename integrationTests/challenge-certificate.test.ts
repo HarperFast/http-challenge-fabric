@@ -3,16 +3,18 @@
  *
  * Covers:
  *  - Harper startup with this application loaded.
- *  - ChallengeCertificate table REST CRUD (PUT / GET / list).
- *  - ACME HTTP-01 challenge middleware: serves the stored challenge token
- *    from /.well-known/acme-challenge/<token> without authentication.
+ *  - ChallengeCertificate table operations via the Harper Operations API (the table
+ *    is not REST-exported; @export is not present in schema.graphql, so it is an
+ *    internal table accessed only through Harper's ops layer and the application code).
+ *  - ACME HTTP-01 challenge middleware: serves the stored challenge content
+ *    at /.well-known/acme-challenge/<token> without authentication.
  *  - Non-challenge requests pass through the middleware unchanged.
  *
  * NOTE: Actual Let's Encrypt certificate issuance requires a live, publicly
  * reachable domain. The ACME cert-generation flow (performHttpChallenge) is
  * intentionally NOT tested here — it cannot be exercised in a hermetic
  * integration-test environment. The tests below validate the Harper integration
- * layer: database interactions, the HTTP middleware, and table REST semantics.
+ * layer: the Operations API for DB interactions and the HTTP middleware behavior.
  */
 import { suite, test, before, after } from 'node:test';
 import { strictEqual, ok } from 'node:assert/strict';
@@ -33,6 +35,31 @@ const FIXTURE_PATH = fileURLToPath(new URL('../', import.meta.url));
 const require = createRequire(import.meta.url);
 const harperBinPath = resolve(dirname(require.resolve('harper')), 'bin/harper.js');
 
+// POST an operation to the Harper Operations API with admin Basic auth.
+async function op<T = unknown>(
+  ctx: ContextWithHarper,
+  operation: Record<string, unknown>,
+): Promise<{ status: number; body: T }> {
+  const { operationsAPIURL, admin } = ctx.harper;
+  const creds = Buffer.from(`${admin.username}:${admin.password}`).toString('base64');
+  const res = await fetch(operationsAPIURL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Basic ${creds}`,
+    },
+    body: JSON.stringify(operation),
+  });
+  const body = (await res.json()) as T;
+  return { status: res.status, body };
+}
+
+// Unauthenticated fetch — ACME challenge endpoint must be publicly reachable.
+function anonFetch(ctx: ContextWithHarper, path: string): Promise<Response> {
+  return fetch(`${ctx.harper.httpURL}${path}`);
+}
+
+// Authenticated fetch for the REST API.
 function authFetch(
   ctx: ContextWithHarper,
   path: string,
@@ -46,11 +73,6 @@ function authFetch(
     ...rest,
     headers: { Authorization: `Basic ${creds}`, ...headers },
   });
-}
-
-// Unauthenticated fetch — ACME challenge endpoint must be publicly reachable.
-function anonFetch(ctx: ContextWithHarper, path: string): Promise<Response> {
-  return fetch(`${ctx.harper.httpURL}${path}`);
 }
 
 suite('Harper startup', (ctx: ContextWithHarper) => {
@@ -69,9 +91,25 @@ suite('Harper startup', (ctx: ContextWithHarper) => {
       `Harper should be reachable, got HTTP ${res.status}`,
     );
   });
+
+  test('ChallengeCertificate table is created in the data database', async () => {
+    // Verify the table exists by searching it via the Operations API.
+    const { status, body } = await op<unknown[]>(ctx, {
+      operation: 'search_by_conditions',
+      database: 'data',
+      table: 'ChallengeCertificate',
+      operator: 'and',
+      get_attributes: ['domain'],
+      conditions: [
+        { search_attribute: 'domain', search_type: 'contains', search_value: '' },
+      ],
+    });
+    strictEqual(status, 200, `Operations API search should succeed, got ${status}: ${JSON.stringify(body)}`);
+    ok(Array.isArray(body), 'expected array result from search');
+  });
 });
 
-suite('ChallengeCertificate table REST API', (ctx: ContextWithHarper) => {
+suite('ChallengeCertificate table via Operations API', (ctx: ContextWithHarper) => {
   before(async () => {
     await setupHarperWithFixture(ctx, FIXTURE_PATH, { harperBinPath });
   });
@@ -82,67 +120,81 @@ suite('ChallengeCertificate table REST API', (ctx: ContextWithHarper) => {
 
   const TEST_DOMAIN = 'test.example.com';
 
-  test('GET /ChallengeCertificate/ returns an empty array initially', async () => {
-    const res = await authFetch(ctx, '/ChallengeCertificate/');
-    strictEqual(res.status, 200, `expected 200, got ${res.status}`);
-    const body = await res.json();
+  test('upsert inserts a new ChallengeCertificate record', async () => {
+    const { status, body } = await op(ctx, {
+      operation: 'upsert',
+      database: 'data',
+      table: 'ChallengeCertificate',
+      records: [
+        {
+          domain: TEST_DOMAIN,
+          challengeToken: 'abc123token',
+          challengeContent: 'abc123token.keyauth-content',
+        },
+      ],
+    });
+    strictEqual(status, 200, `upsert should succeed, got ${status}: ${JSON.stringify(body)}`);
+  });
+
+  test('search_by_id retrieves the inserted record', async () => {
+    // Insert the record first.
+    await op(ctx, {
+      operation: 'upsert',
+      database: 'data',
+      table: 'ChallengeCertificate',
+      records: [
+        {
+          domain: TEST_DOMAIN,
+          challengeToken: 'abc123token',
+          challengeContent: 'abc123token.keyauth-content',
+        },
+      ],
+    });
+
+    const { status, body } = await op<Array<{ domain: string; challengeToken: string; challengeContent: string }>>(ctx, {
+      operation: 'search_by_id',
+      database: 'data',
+      table: 'ChallengeCertificate',
+      ids: [TEST_DOMAIN],
+      get_attributes: ['domain', 'challengeToken', 'challengeContent'],
+    });
+    strictEqual(status, 200, `search_by_id should succeed, got ${status}: ${JSON.stringify(body)}`);
     ok(Array.isArray(body), 'expected array response');
+    strictEqual(body.length, 1, 'expected exactly one record');
+    strictEqual(body[0].domain, TEST_DOMAIN, 'domain should match');
+    strictEqual(body[0].challengeToken, 'abc123token', 'challengeToken should match');
+    strictEqual(body[0].challengeContent, 'abc123token.keyauth-content', 'challengeContent should match');
   });
 
-  test('PUT /ChallengeCertificate/:domain creates a record', async () => {
-    const res = await authFetch(ctx, `/ChallengeCertificate/${TEST_DOMAIN}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        domain: TEST_DOMAIN,
-        challengeToken: 'abc123token',
-        challengeContent: 'abc123token.keyauth-content',
-      }),
-    });
-    ok(
-      [200, 201, 204].includes(res.status),
-      `expected successful PUT, got HTTP ${res.status}`,
-    );
-  });
-
-  test('GET /ChallengeCertificate/:domain retrieves the record', async () => {
-    // Ensure the record exists first.
-    await authFetch(ctx, `/ChallengeCertificate/${TEST_DOMAIN}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        domain: TEST_DOMAIN,
-        challengeToken: 'abc123token',
-        challengeContent: 'abc123token.keyauth-content',
-      }),
+  test('search_by_conditions lists all records in the table', async () => {
+    // Insert a record.
+    await op(ctx, {
+      operation: 'upsert',
+      database: 'data',
+      table: 'ChallengeCertificate',
+      records: [
+        {
+          domain: TEST_DOMAIN,
+          challengeToken: 'listcheck',
+          challengeContent: 'listcheck.keyauth',
+        },
+      ],
     });
 
-    const res = await authFetch(ctx, `/ChallengeCertificate/${TEST_DOMAIN}`);
-    strictEqual(res.status, 200, `expected 200, got ${res.status}`);
-    const body = await res.json() as { domain: string; challengeToken: string; challengeContent: string };
-    strictEqual(body.domain, TEST_DOMAIN, 'domain should match');
-    strictEqual(body.challengeToken, 'abc123token', 'challengeToken should match');
-    strictEqual(body.challengeContent, 'abc123token.keyauth-content', 'challengeContent should match');
-  });
-
-  test('GET /ChallengeCertificate/ includes the created record', async () => {
-    // Ensure the record exists.
-    await authFetch(ctx, `/ChallengeCertificate/${TEST_DOMAIN}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        domain: TEST_DOMAIN,
-        challengeToken: 'listcheck',
-        challengeContent: 'listcheck.keyauth',
-      }),
+    const { status, body } = await op<Array<{ domain: string }>>(ctx, {
+      operation: 'search_by_conditions',
+      database: 'data',
+      table: 'ChallengeCertificate',
+      operator: 'and',
+      get_attributes: ['domain'],
+      conditions: [
+        { search_attribute: 'domain', search_type: 'contains', search_value: 'example.com' },
+      ],
     });
-
-    const res = await authFetch(ctx, '/ChallengeCertificate/');
-    strictEqual(res.status, 200, `expected 200, got ${res.status}`);
-    const body = await res.json() as Array<{ domain: string }>;
+    strictEqual(status, 200, `search should succeed, got ${status}: ${JSON.stringify(body)}`);
     ok(Array.isArray(body), 'expected array response');
     const found = body.some((item) => item.domain === TEST_DOMAIN);
-    ok(found, `domain ${TEST_DOMAIN} should appear in the list`);
+    ok(found, `domain ${TEST_DOMAIN} should appear in the search results`);
   });
 });
 
@@ -159,43 +211,46 @@ suite('ACME HTTP-01 challenge middleware', (ctx: ContextWithHarper) => {
   const TOKEN = 'challenge-token-xyz';
   const KEY_AUTH = 'challenge-token-xyz.AAAA_key_authorization_content';
 
-  test('stores a challenge token in the database', async () => {
-    const res = await authFetch(ctx, `/ChallengeCertificate/${DOMAIN}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        domain: DOMAIN,
-        challengeToken: TOKEN,
-        challengeContent: KEY_AUTH,
-      }),
+  test('upserts a challenge token into the database via Operations API', async () => {
+    const { status, body } = await op(ctx, {
+      operation: 'upsert',
+      database: 'data',
+      table: 'ChallengeCertificate',
+      records: [
+        {
+          domain: DOMAIN,
+          challengeToken: TOKEN,
+          challengeContent: KEY_AUTH,
+        },
+      ],
     });
-    ok(
-      [200, 201, 204].includes(res.status),
-      `expected successful PUT, got HTTP ${res.status}`,
-    );
+    strictEqual(status, 200, `upsert should succeed, got ${status}: ${JSON.stringify(body)}`);
   });
 
   test('middleware serves the challenge content at /.well-known/acme-challenge/<token>', async () => {
-    // First, store the challenge so the middleware can find it.
-    await authFetch(ctx, `/ChallengeCertificate/${DOMAIN}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        domain: DOMAIN,
-        challengeToken: TOKEN,
-        challengeContent: KEY_AUTH,
-      }),
+    // Store the challenge via the Operations API so the middleware can find it.
+    await op(ctx, {
+      operation: 'upsert',
+      database: 'data',
+      table: 'ChallengeCertificate',
+      records: [
+        {
+          domain: DOMAIN,
+          challengeToken: TOKEN,
+          challengeContent: KEY_AUTH,
+        },
+      ],
     });
 
-    // Poll briefly to allow any replication lag.
+    // Poll briefly to allow any replication/write visibility lag.
     let res: Response | null = null;
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 10; i++) {
       res = await anonFetch(ctx, `/.well-known/acme-challenge/${TOKEN}`);
       if (res.status === 200) break;
-      await new Promise((r) => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 300));
     }
     ok(res !== null, 'response should not be null');
-    strictEqual(res!.status, 200, `middleware should return 200 for a valid token`);
+    strictEqual(res!.status, 200, `middleware should return 200 for a valid token, got ${res!.status}`);
     const text = await res!.text();
     strictEqual(text, KEY_AUTH, 'middleware should return the key authorization content');
   });
