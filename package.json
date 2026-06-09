@@ -4,12 +4,19 @@
   "description": "Handle HTTP Challenge for Let's Encrypt",
   "prettier": "@harperdb/code-guidelines/prettier",
   "type": "module",
+  "scripts": {
+    "test:integration": "harper-integration-test-run \"integrationTests/**/*.test.ts\""
+  },
   "dependencies": {
     "@harperdb/code-guidelines": "^0.0.2",
     "acme-client": "^5.4.0"
   },
   "devDependencies": {
-    "prettier": "^3.3.3"
+    "@harperfast/integration-testing": "^0.4.0",
+    "@types/node": "^25.9.2",
+    "harper": "^5.0.29",
+    "prettier": "^3.3.3",
+    "typescript": "^6.0.3"
   },
   "overrides": {
     "acme-client": {
